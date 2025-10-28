@@ -6,11 +6,10 @@ import tarfile
 import io
 from collections import deque
 from urllib.request import urlopen
-from urllib.error import URLError
 
 CONFIG_FILE = "config.csv"
 
-# ---------- Вспомогательные функции из Этапа 2 ----------
+# ---------- 1. Конфигурация ----------
 def read_config(config_path: str):
     if not os.path.isfile(config_path):
         raise FileNotFoundError(f"Файл конфигурации не найден: {config_path}")
@@ -33,15 +32,12 @@ def validate_config(config: dict):
         config['depth'] = int(config['depth'])
         if config['depth'] < 0:
             raise ValueError("Глубина должна быть >= 0")
-    except ValueError as e:
-        if "Глубина" not in str(e):
-            raise ValueError("Параметр 'depth' должен быть целым числом.")
-        else:
-            raise
+    except ValueError:
+        raise ValueError("Параметр 'depth' должен быть целым числом.")
     if config['repo_mode'] not in ('local', 'remote'):
         raise ValueError("repo_mode должен быть 'local' или 'remote'")
 
-# ---------- Работа с Alpine (remote) ----------
+# ---------- 2. Alpine (remote) ----------
 def fetch_apkindex(url: str) -> str:
     index_url = url.rstrip('/') + '/APKINDEX.tar.gz'
     try:
@@ -80,13 +76,14 @@ def get_dependencies_from_apkindex(packages, name, version):
     pkg = next((p for p in packages if p.get('P') == name and p.get('V') == version), None)
     if not pkg:
         return None
-    deps = pkg.get('D', '').split() if pkg.get('D') else []
-    # Убираем версионные условия: "lib>=1.0" → "lib"
+    deps_raw = pkg.get('D', '')
+    if not deps_raw:
+        return []
+    deps = deps_raw.split()
     clean_deps = []
     for d in deps:
         if d.startswith('so:'):
-            continue  # пропускаем системные зависимости (по желанию)
-        # Удаляем всё после первого символа сравнения
+            continue
         for sep in ['=', '>', '<', '!']:
             if sep in d:
                 d = d.split(sep)[0]
@@ -94,7 +91,7 @@ def get_dependencies_from_apkindex(packages, name, version):
         clean_deps.append(d)
     return clean_deps
 
-# ---------- Работа с тестовым репозиторием (local) ----------
+# ---------- 3. Тестовый репозиторий (local) ----------
 def load_test_repo(path: str):
     if not os.path.isfile(path):
         raise FileNotFoundError(f"Тестовый репозиторий не найден: {path}")
@@ -107,21 +104,11 @@ def get_dependencies_from_test_repo(repo, name, version):
         return None
     return pkg.get('dependencies', [])
 
-# ---------- Основная логика построения графа (BFS) ----------
-def build_dependency_graph(
-    start_package: str,
-    start_version: str,
-    get_deps_func,
-    max_depth: int,
-    filter_substring: str
-):
-    """
-    Возвращает граф в виде словаря: {пакет: [зависимости]}
-    """
+# ---------- 4. Построение графа (BFS) ----------
+def build_dependency_graph(start_package, start_version, get_deps_func, max_depth, filter_substring):
     graph = {}
     visited = set()
     queue = deque()
-    # Элемент: (package_name, depth)
     queue.append((start_package, 0))
     visited.add(start_package)
 
@@ -130,20 +117,13 @@ def build_dependency_graph(
         if depth >= max_depth:
             continue
 
-        # Получаем зависимости
         deps = get_deps_func(current, start_version if current == start_package else "1.0")
         if deps is None:
-            deps = []  # пакет не найден — считаем, что зависимостей нет
+            deps = []
 
-        # Фильтруем
-        filtered_deps = [
-            d for d in deps
-            if filter_substring not in d
-        ]
-
+        filtered_deps = [d for d in deps if filter_substring not in d]
         graph[current] = filtered_deps
 
-        # Добавляем в очередь новые узлы
         for dep in filtered_deps:
             if dep not in visited:
                 visited.add(dep)
@@ -151,16 +131,29 @@ def build_dependency_graph(
 
     return graph
 
-# ---------- Вывод графа ----------
+# ---------- 5. Вывод графа ----------
 def print_graph(graph, start_package):
     print(f"\nГраф зависимостей (начиная с '{start_package}'):")
     for pkg, deps in graph.items():
-        if deps:
-            print(f"  {pkg} → {', '.join(deps)}")
-        else:
-            print(f"  {pkg} → (нет зависимостей)")
+        print(f"  {pkg} → {', '.join(deps) if deps else '(нет зависимостей)'}")
 
-# ---------- Основная функция ----------
+# ---------- 6. Порядок установки (DFS post-order) ----------
+def get_installation_order(graph, start_package):
+    visited = set()
+    installed = []
+
+    def dfs(node):
+        if node in visited:
+            return
+        visited.add(node)
+        for dep in graph.get(node, []):
+            dfs(dep)
+        installed.append(node)
+
+    dfs(start_package)
+    return installed
+
+# ---------- 7. Основная функция ----------
 def main():
     try:
         config = read_config(CONFIG_FILE)
@@ -170,41 +163,41 @@ def main():
         for k, v in config.items():
             print(f"  {k}: {v}")
 
-        # Выбираем функцию получения зависимостей
+        # Выбор режима
         if config['repo_mode'] == 'remote':
             print("\n[Режим: remote] Загрузка APKINDEX...")
             index_text = fetch_apkindex(config['repository_url'])
             packages = parse_apkindex(index_text)
-            def get_deps(name, version):
-                return get_dependencies_from_apkindex(packages, name, version)
-            actual_version = config['package_version']
-
-        elif config['repo_mode'] == 'local':
+            get_deps = lambda name, ver: get_dependencies_from_apkindex(packages, name, ver)
+        else:
             print("\n[Режим: local] Загрузка тестового репозитория...")
             repo = load_test_repo(config['repository_url'])
-            def get_deps(name, version):
-                return get_dependencies_from_test_repo(repo, name, version)
-            actual_version = config['package_version']
+            get_deps = lambda name, ver: get_dependencies_from_test_repo(repo, name, ver)
 
-        else:
-            raise ValueError("Неподдерживаемый режим")
-
-        # Строим граф
+        # Построение графа
         graph = build_dependency_graph(
-            start_package=config['package_name'],
-            start_version=actual_version,
-            get_deps_func=get_deps,
-            max_depth=config['depth'],
-            filter_substring=config['filter_substring']
+            config['package_name'],
+            config['package_version'],
+            get_deps,
+            config['depth'],
+            config['filter_substring']
         )
 
         print_graph(graph, config['package_name'])
 
+        # Порядок установки
+        order = get_installation_order(graph, config['package_name'])
+        print(f"\nПорядок установки для '{config['package_name']}':")
+        for i, pkg in enumerate(order, 1):
+            print(f"  {i}. {pkg}")
+
+        print("\n[Сравнение с реальным менеджером]")
+        print("Настоящие менеджеры (apk, apt) устанавливают зависимости от листьев к корню.")
+        print("Циклы обрабатываются путём пропуска уже установленных пакетов — как у нас.")
+
     except Exception as e:
         print(f"Ошибка: {e}", file=sys.stderr)
-        if __name__ == "__main__":
-            input("\nНажмите Enter для выхода...")
-        sys.exit(1)
+        input("\nНажмите Enter для выхода...")
 
 if __name__ == "__main__":
     main()
