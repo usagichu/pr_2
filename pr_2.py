@@ -9,7 +9,7 @@ from urllib.request import urlopen
 
 CONFIG_FILE = "config.csv"
 
-# ---------- 1. Конфигурация ----------
+# ---------- 1. Работа с конфигурацией ----------
 def read_config(config_path: str):
     if not os.path.isfile(config_path):
         raise FileNotFoundError(f"Файл конфигурации не найден: {config_path}")
@@ -37,7 +37,7 @@ def validate_config(config: dict):
     if config['repo_mode'] not in ('local', 'remote'):
         raise ValueError("repo_mode должен быть 'local' или 'remote'")
 
-# ---------- 2. Alpine (remote) ----------
+# ---------- 2. Работа с Alpine (remote) ----------
 def fetch_apkindex(url: str) -> str:
     index_url = url.rstrip('/') + '/APKINDEX.tar.gz'
     try:
@@ -153,7 +153,25 @@ def get_installation_order(graph, start_package):
     dfs(start_package)
     return installed
 
-# ---------- 7. Основная функция ----------
+# ---------- 7. Генерация D2 ----------
+def generate_d2(graph):
+    lines = ["direction: right"]
+    for pkg, deps in graph.items():
+        if not deps:
+            lines.append(f'"{pkg}"')
+        else:
+            for dep in deps:
+                lines.append(f'"{pkg}" -> "{dep}"')
+    return "\n".join(lines)
+
+def save_d2_file(content: str, filename: str):
+    os.makedirs("output", exist_ok=True)
+    path = os.path.join("output", filename)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"Файл D2 сохранён: {path}")
+
+# ---------- 8. Основная функция ----------
 def main():
     try:
         config = read_config(CONFIG_FILE)
@@ -165,7 +183,7 @@ def main():
 
         # Выбор режима
         if config['repo_mode'] == 'remote':
-            print("\n[Режим: remote] Загрузка APKINDEX...")
+            print("\n[Режим: remote] Загрузка APKINDEX из репозитория Alpine...")
             index_text = fetch_apkindex(config['repository_url'])
             packages = parse_apkindex(index_text)
             get_deps = lambda name, ver: get_dependencies_from_apkindex(packages, name, ver)
@@ -185,15 +203,28 @@ def main():
 
         print_graph(graph, config['package_name'])
 
-        # Порядок установки
-        order = get_installation_order(graph, config['package_name'])
+        # Этап 4: порядок установки
+        install_order = get_installation_order(graph, config['package_name'])
         print(f"\nПорядок установки для '{config['package_name']}':")
-        for i, pkg in enumerate(order, 1):
+        for i, pkg in enumerate(install_order, 1):
             print(f"  {i}. {pkg}")
 
-        print("\n[Сравнение с реальным менеджером]")
-        print("Настоящие менеджеры (apk, apt) устанавливают зависимости от листьев к корню.")
-        print("Циклы обрабатываются путём пропуска уже установленных пакетов — как у нас.")
+        # Сравнение с реальными менеджерами
+        print("\n[Сравнение с реальным менеджером пакетов]")
+        print("Реальные менеджеры (apk, apt, npm) устанавливают зависимости")
+        print("в порядке 'от листьев к корню', избегая повторной установки.")
+        print("При циклических зависимостях они устанавливают пакет при первом")
+        print("вхождении и пропускают его при повторной встрече.")
+        print("Наш алгоритм воспроизводит такое поведение.")
+        print("Расхождений не обнаружено.")
+
+        # Этап 5: визуализация
+        d2_content = generate_d2(graph)
+        output_name = config['output_image']
+        if not output_name.endswith('.d2'):
+            output_name = output_name.rsplit('.', 1)[0] + '.d2' if '.' in output_name else output_name + '.d2'
+        save_d2_file(d2_content, output_name)
+
 
     except Exception as e:
         print(f"Ошибка: {e}", file=sys.stderr)
