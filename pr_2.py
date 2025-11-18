@@ -72,24 +72,49 @@ def parse_apkindex(index_text: str):
         packages.append(current)
     return packages
 
+
 def get_dependencies_from_apkindex(packages, name, version):
     pkg = next((p for p in packages if p.get('P') == name and p.get('V') == version), None)
     if not pkg:
         return None
+
     deps_raw = pkg.get('D', '')
     if not deps_raw:
         return []
+
     deps = deps_raw.split()
     clean_deps = []
+
+    # Маппинг файлов и библиотек к пакетам
+    dependency_mapping = {
+        '/bin/sh': 'busybox',
+        '/sbin/ldconfig': 'libc-utils',
+        'so:libc.musl-x86_64.so.1': 'musl',
+        'so:libcrypto.so.3': 'libcrypto3',
+        'so:libssl.so.3': 'libssl3',
+        'so:libpcre.so.1': 'pcre',
+        'so:libz.so.1': 'zlib',
+    }
+
     for d in deps:
-        if d.startswith('so:'):
+        # Преобразуем файлы и библиотеки в имена пакетов
+        if d in dependency_mapping:
+            clean_deps.append(dependency_mapping[d])
             continue
+
+        # Очищаем от условий версий
+        original_d = d
         for sep in ['=', '>', '<', '!']:
             if sep in d:
                 d = d.split(sep)[0]
                 break
-        clean_deps.append(d)
-    return clean_deps
+
+        # Добавляем только если это не файл/библиотека
+        if not d.startswith('/') and not d.startswith('so:'):
+            clean_deps.append(d)
+
+    # Убираем дубликаты
+    return list(set(clean_deps))
 
 # ---------- 3. Тестовый репозиторий (local) ----------
 def load_test_repo(path: str):
